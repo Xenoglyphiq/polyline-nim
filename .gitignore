@@ -4,3 +4,9 @@ tests/*
 !tests/config.nims
 bin/
 .DS_Store
+examples/*
+!examples/*.nim
+!examples/config.nims
+bench/*
+!bench/*.nim
+!bench/config.nims
