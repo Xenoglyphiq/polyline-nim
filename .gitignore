@@ -7,3 +7,6 @@ bin/
 examples/*
 !examples/*.nim
 !examples/config.nims
+bench/*
+!bench/*.nim
+!bench/config.nims

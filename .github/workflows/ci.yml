@@ -33,3 +33,6 @@ jobs:
 
       - name: Short fuzz run
         run: FUZZ_SECONDS=30 nimble fuzz
+
+      - name: Benchmark runs and round-trips the input (timings not recorded from CI)
+        run: nimble bench

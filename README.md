@@ -1,6 +1,6 @@
 # Polyline for Nim
 
-Encode and decode lists of coordinates as compact ASCII strings. Implements Google's Encoded Polyline Algorithm Format · Spec v0.1.0 · Conformance: **core ✓ full ✓** (44/44)
+Encode and decode lists of coordinates as compact ASCII strings. Implements Google's Encoded Polyline Algorithm Format · Spec v0.1.1 · Conformance: **core ✓ full ✓** (44/44)
 
 > **Coordinate order:** `LonLat` is `(lon, lat)`; the encoded string stores latitude first. The library converts at the boundary.
 
@@ -93,6 +93,7 @@ There is no io layer: everything works on in-memory strings and arrays.
 | `nimble conformance` | Every case in `.spec/conformance/manifest.json` |
 | `nimble examples` | The three canonical examples |
 | `FUZZ_SECONDS=600 nimble fuzz` | Mutation-fuzz the decoder (`FUZZ_SEED` replays a run) |
+| `nimble bench` | Timings on `.spec/bench/route_100k.polyline` (`-d:release`; method in `.spec/bench/README.md`) |
 
 ## Performance
 
@@ -101,7 +102,7 @@ There is no io layer: everything works on in-memory strings and arrays.
 | Encode 100k points | Rust `polyline` | — | — |
 | Decode 100k points | Rust `polyline` | — | — |
 
-Recorded before v0.1.0.
+Measured with `nimble bench` (`-d:release`) using the shared method in `.spec/bench/README.md`. Recorded before v0.1.0.
 
 ## License
 

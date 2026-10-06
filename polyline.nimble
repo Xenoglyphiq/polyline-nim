@@ -22,3 +22,6 @@ task examples, "Run the three canonical examples":
 task fuzz, "Mutation-fuzz the decoder (FUZZ_SECONDS, default 10; FUZZ_SEED)":
   exec "nim c --hints:off -d:release --overflowChecks:on --rangeChecks:on " &
     "--boundChecks:on -r tests/fuzz.nim"
+
+task bench, "Time encode and decode on .spec/bench/route_100k.polyline":
+  exec "nim c --hints:off -d:release -r bench/bench.nim"
