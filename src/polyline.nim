@@ -51,23 +51,24 @@ proc checkPrecision(precision: int): float64 {.raises: [PolylineError].} =
                msg = "precision " & $precision & " is outside 1-10")
   pow10[precision]
 
-proc scaleValue(x, scale: float64): int64 {.raises: [PolylineError].} =
-  ## Scale one coordinate to its integer form (spec §3 `encode`, step 3).
-  if x.classify in {fcNan, fcInf, fcNegInf}:
-    raise fail("polyline.non_finite", msg = "coordinate is NaN or infinite")
-  # math.round rounds half away from zero on the C backend, the family-wide rule.
-  let n = round(x * scale)
-  # Guard the float -> int64 conversion; a failed comparison (NaN) also lands here.
-  if not (n >= -two63 and n < two63):
-    raise fail("polyline.overflow", msg = "scaled coordinate does not fit in int64")
-  int64(n)
+# Hot loops. Every overflow they could hit is guarded by hand, so the compiler's
+# own overflow checks are redundant there and cost ~40% of the run time. They
+# stay on in test and fuzz builds (`-d:polylineChecked`), so the fuzzer still
+# catches a missing manual guard. The loops never raise: on failure they record
+# a `Failure` and return, and the public procs raise once.
+when defined(polylineChecked):
+  {.push overflowChecks: on.}
+else:
+  {.push overflowChecks: off.}
 
-proc delta(curr, prev: int64): int64 {.raises: [PolylineError].} =
-  ## `curr - prev`, checked before subtracting.
-  if (prev < 0 and curr > high(int64) + prev) or
-     (prev > 0 and curr < low(int64) + prev):
-    raise fail("polyline.overflow", msg = "delta does not fit in int64")
-  curr - prev
+type Failure = object
+  ## Built from literals only: formatting strings inside the hot loops adds
+  ## cleanup code that slows them down even on the success path.
+  code: string
+  kind: ErrorKind
+  offset: int        # -1 when the spec defines none
+  msg: string
+  byte: uint8        # the offending byte, for invalid_char
 
 func zigzag(d: int64): uint64 {.inline.} =
   (cast[uint64](d) shl 1) xor cast[uint64](ashr(d, 63))
@@ -88,6 +89,111 @@ proc writeValue(s: var string, i: var int, d: int64) {.inline.} =
   s[i] = char(u + 63)
   inc i
 
+proc scaleAll(points: openArray[LonLat], scale: float64, scaled: var seq[int64],
+              err: var Failure): bool {.raises: [].} =
+  ## Spec §3 `encode` step 3 for every coordinate, lat then lon, in order.
+  scaled.setLen(2 * points.len)
+  var k = 0
+  for p in points:
+    for x in [p.lat, p.lon]:
+      if x.classify in {fcNan, fcInf, fcNegInf}:
+        err = Failure(code: "polyline.non_finite", offset: -1, msg: "coordinate is NaN or infinite")
+        return false
+      # math.round rounds half away from zero on the C backend, the family-wide rule.
+      let n = round(x * scale)
+      # Guard the float -> int64 conversion (Nim never checks it); NaN fails too.
+      if not (n >= -two63 and n < two63):
+        err = Failure(code: "polyline.overflow", offset: -1, msg: "scaled coordinate does not fit in int64")
+        return false
+      scaled[k] = int64(n)
+      inc k
+  true
+
+proc encodeScaled(scaled: openArray[int64], output: var string,
+                  err: var Failure): bool {.raises: [].} =
+  ## Spec §3 `encode` steps 4–5: deltas (checked), exact length, then write.
+  var total = 0
+  var prev = [0'i64, 0'i64]
+  for k, v in scaled:
+    let p = prev[k and 1]
+    if (p < 0 and v > high(int64) + p) or (p > 0 and v < low(int64) + p):
+      err = Failure(code: "polyline.overflow", offset: -1, msg: "delta does not fit in int64")
+      return false
+    total += encodedLen(v - p)
+    prev[k and 1] = v
+  output = newString(total)
+  var i = 0
+  prev = [0'i64, 0'i64]
+  for k, v in scaled:
+    output.writeValue(i, v - prev[k and 1])
+    prev[k and 1] = v
+  assert i == total
+  true
+
+proc decodeInto(text: string, scale: float64, maxPoints: uint64,
+                points: var seq[LonLat], err: var Failure): bool {.raises: [].} =
+  ## Spec §3 `decode` step 3 onwards.
+  var sumLat, sumLon: int64
+  var isLon = false
+  var latStart = 0
+  var i = 0
+  let n = text.len
+  while i < n:
+    let start = i
+    var u = 0'u64
+    var shift = 0
+    while true:
+      if i >= n:
+        err = Failure(code: "polyline.truncated", offset: start, msg: "input ends mid-value")
+        return false
+      let c = uint8(text[i])
+      if c < 63 or c > 126:
+        err = Failure(code: "polyline.invalid_char", offset: i,
+                      msg: "byte outside 63-126", byte: c)
+        return false
+      let b = uint64(c) - 63
+      # At most 13 chunks; at shift 60 only 4 bits fit in a uint64.
+      if shift > 60 or (shift == 60 and (b and 0x1F) > 0xF):
+        err = Failure(code: "polyline.overflow", offset: start, msg: "value does not fit in 64 bits")
+        return false
+      u = u or ((b and 0x1F) shl shift)
+      inc i
+      if b < 0x20: break
+      shift += 5
+    let half = cast[int64](u shr 1)
+    let d = if (u and 1) == 1: not half else: half
+    if not isLon:
+      if (d > 0 and sumLat > high(int64) - d) or (d < 0 and sumLat < low(int64) - d):
+        err = Failure(code: "polyline.overflow", offset: start, msg: "running sum does not fit in int64")
+        return false
+      sumLat += d
+      latStart = start
+      isLon = true
+    else:
+      if (d > 0 and sumLon > high(int64) - d) or (d < 0 and sumLon < low(int64) - d):
+        err = Failure(code: "polyline.overflow", offset: start, msg: "running sum does not fit in int64")
+        return false
+      sumLon += d
+      if uint64(points.len) >= maxPoints:
+        err = Failure(code: "polyline.too_many_points", kind: ekLimitExceeded, offset: -1,
+                      msg: "more points than max_points")
+        return false
+      # Divide; multiplying by 10^-p differs in the last bit.
+      points.add LonLat(lon: float64(sumLon) / scale, lat: float64(sumLat) / scale)
+      isLon = false
+  if isLon:
+    err = Failure(code: "polyline.truncated", offset: latStart, msg: "latitude with no longitude")
+    return false
+  true
+
+{.pop.}
+
+proc raiseFailure(err: Failure) {.noreturn, raises: [PolylineError].} =
+  let msg = if err.code == "polyline.invalid_char": "byte " & $err.byte & " is outside 63-126"
+            else: err.msg
+  raise fail(err.code, err.kind,
+             if err.offset < 0: none(uint64) else: some(uint64(err.offset)), msg)
+
 proc encode*(points: openArray[LonLat], precision = 5,
              limits = Limits()): string {.raises: [PolylineError].} =
   ## Spec operation `encode`. Encodes `points` as a polyline string at
@@ -96,36 +202,11 @@ proc encode*(points: openArray[LonLat], precision = 5,
   if uint64(points.len) > limits.maxPoints:
     raise fail("polyline.too_many_points", ekLimitExceeded,
                msg = $points.len & " points, limit " & $limits.maxPoints)
-
-  # Pass 1: validate and scale every coordinate before any delta (spec error order).
-  for p in points:
-    discard scaleValue(p.lat, scale)
-    discard scaleValue(p.lon, scale)
-
-  # Pass 2: deltas, overflow checks and the exact output length.
-  var total = 0
-  var prevLat, prevLon: int64
-  for p in points:
-    let lat = scaleValue(p.lat, scale)
-    let lon = scaleValue(p.lon, scale)
-    total += encodedLen(delta(lat, prevLat))
-    total += encodedLen(delta(lon, prevLon))
-    prevLat = lat
-    prevLon = lon
-
-  # Pass 3: write. Every check has passed, so the subtractions cannot overflow.
-  result = newString(total)
-  var i = 0
-  prevLat = 0
-  prevLon = 0
-  for p in points:
-    let lat = scaleValue(p.lat, scale)
-    let lon = scaleValue(p.lon, scale)
-    result.writeValue(i, lat - prevLat)
-    result.writeValue(i, lon - prevLon)
-    prevLat = lat
-    prevLon = lon
-  assert i == total
+  var err: Failure
+  var scaled: seq[int64]
+  # Scale every coordinate once, before any delta (spec error order).
+  if not scaleAll(points, scale, scaled, err): raiseFailure(err)
+  if not encodeScaled(scaled, result, err): raiseFailure(err)
 
 proc decode*(text: string, precision = 5,
              limits = Limits()): seq[LonLat] {.raises: [PolylineError].} =
@@ -138,57 +219,5 @@ proc decode*(text: string, precision = 5,
   if uint64(text.len) > limits.maxTextLength:
     raise fail("polyline.text_too_long", ekLimitExceeded,
                msg = $text.len & " bytes, limit " & $limits.maxTextLength)
-
-  var sumLat, sumLon: int64
-  var isLon = false
-  var latStart = 0
-  var i = 0
-  while i < text.len:
-    let start = i
-    var u = 0'u64
-    var chunks = 0
-    while true:
-      if i >= text.len:
-        raise fail("polyline.truncated", offset = some(uint64(start)),
-                   msg = "input ends mid-value")
-      let c = uint8(text[i])
-      if c < 63 or c > 126:
-        raise fail("polyline.invalid_char", offset = some(uint64(i)),
-                   msg = "byte " & $c & " is outside 63-126")
-      let b = uint64(c - 63)
-      inc chunks
-      if chunks > 13:
-        raise fail("polyline.overflow", offset = some(uint64(start)),
-                   msg = "value has more than 13 chunks")
-      let shift = 5 * (chunks - 1)
-      # At shift 60 only 4 bits fit in a uint64.
-      if shift == 60 and (b and 0x1F) > 0xF:
-        raise fail("polyline.overflow", offset = some(uint64(start)),
-                   msg = "value does not fit in 64 bits")
-      u = u or ((b and 0x1F) shl shift)
-      inc i
-      if b < 0x20: break
-
-    let half = cast[int64](u shr 1)
-    let d = if (u and 1) == 1: not half else: half
-    template addChecked(sum: untyped) =
-      if (d > 0 and sum > high(int64) - d) or (d < 0 and sum < low(int64) - d):
-        raise fail("polyline.overflow", offset = some(uint64(start)),
-                   msg = "running sum does not fit in int64")
-      sum += d
-    if not isLon:
-      addChecked(sumLat)
-      latStart = start
-      isLon = true
-    else:
-      addChecked(sumLon)
-      if uint64(result.len) >= limits.maxPoints:
-        raise fail("polyline.too_many_points", ekLimitExceeded,
-                   msg = "more than " & $limits.maxPoints & " points")
-      # Divide; multiplying by 10^-p differs in the last bit.
-      result.add LonLat(lon: float64(sumLon) / scale, lat: float64(sumLat) / scale)
-      isLon = false
-
-  if isLon:
-    raise fail("polyline.truncated", offset = some(uint64(latStart)),
-               msg = "latitude with no longitude")
+  var err: Failure
+  if not decodeInto(text, scale, limits.maxPoints, result, err): raiseFailure(err)
