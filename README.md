@@ -8,17 +8,17 @@ Requires Nim **2.2.12** on the C backend (the JS backend is untested). Standard 
 
 ## Install
 
-> Listing in the Nimble directory (`nimble install polyline`) is pending; until it lands, install by URL as below.
-
 ```
-nimble install https://github.com/Xenoglyphiq/polyline-nim@#v0.1.0
+nimble install polyline
 ```
 
 Or in your `.nimble` file:
 
 ```nim
-requires "https://github.com/Xenoglyphiq/polyline-nim#v0.1.0"
+requires "polyline >= 0.1.0"
 ```
+
+To pin the exact release by URL instead: `nimble install https://github.com/Xenoglyphiq/polyline-nim@#v0.1.0`.
 
 ## Quick start
 
