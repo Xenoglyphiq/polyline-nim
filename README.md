@@ -8,6 +8,11 @@ Requires Nim **2.2.12** on the C backend (the JS backend is untested). Standard 
 
 ## Install
 
+> **Not released yet.** `v0.1.0` is the first tag and isn't published; until then, install `main`:
+> `nimble install https://github.com/Xenoglyphiq/polyline-nim@#head`
+
+Once released:
+
 ```
 nimble install https://github.com/Xenoglyphiq/polyline-nim@#v0.1.0
 ```
