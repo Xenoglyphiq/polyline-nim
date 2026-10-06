@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.0.0"
+version       = "0.1.0"
 author        = "Xenoglyphiq contributors"
 description   = "Encode and decode Google's Encoded Polyline Algorithm Format"
 license       = "MIT OR Apache-2.0"
